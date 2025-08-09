@@ -3,102 +3,98 @@ import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Load Telegram API credentials from environment variables
 APP_ID = int(os.environ.get("APP_ID"))
 APP_HASH = os.environ.get("APP_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-# Gofile upload URL (auto region detects)
 GOFILE_UPLOAD_URL = "https://upload.gofile.io/uploadFile"
 
-# Initialize Pyrogram client (bot)
+# Initialize Pyrogram bot session
 app = Client("gofilebot", api_id=APP_ID, api_hash=APP_HASH, bot_token=BOT_TOKEN)
 
 def upload_to_gofile(file_path):
     """
-    Uploads a file to Gofile using their API and returns the download page URL.
-    Implements error handling and logs important responses.
+    Upload a file to Gofile and return the download link.
+    All exceptions are handled internally.
     """
     try:
         with open(file_path, "rb") as f:
             files = {'file': f}
             response = requests.post(GOFILE_UPLOAD_URL, files=files, timeout=300)
-        
-        if response.status_code != 200:
-            print(f"[ERROR] Gofile upload failed with status code: {response.status_code}")
-            print("Response text:", response.text)
+
+        # Try parsing JSON, else log raw response
+        try:
+            data = response.json()
+        except Exception as e:
+            print(f"[ERROR] JSON decode error: {e}")
+            print("Gofile response:", response.text)
             return None
 
-        data = response.json()
-
-        if data.get('status') == 'ok':
-            return data['data']['downloadPage']
+        # API-level error handling
+        if data.get("status") == "ok":
+            return data["data"]["downloadPage"]
         else:
             print("[ERROR] Gofile API error:", data)
             return None
-    
-    except requests.exceptions.RequestException as e:
-        print("[ERROR] Network or request exception:", e)
-        return None
-    except ValueError as e:
-        # JSON decode error or similar
-        print("[ERROR] JSON decode failed:", e)
-        print("Response text:", response.text if 'response' in locals() else "No response")
+
+    except Exception as e:
+        print(f"[ERROR] Exception in upload_to_gofile: {e}")
         return None
 
 @app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
     await message.reply(
         "👋 Hello! Send me any file (photo, video, audio, document) up to 2GB, "
-        "and I will upload it to Gofile.io for you and send back a download link.\n\n"
-        "Use /help to see more info."
+        "and I will upload it to Gofile.io for you and send a download link.\n\n"
+        "Use /help for more info."
     )
 
 @app.on_message(filters.command("help"))
 async def help_command(client: Client, message: Message):
     await message.reply(
-        "📚 *How to use*:\n"
-        "- Send me a file as a document, photo, video, or audio.\n"
-        "- I will upload the file to Gofile and reply with a downloadable link.\n\n"
-        "⚠️ Note:\n"
-        "- Max file size is 2GB (Telegram limit).\n"
-        "- For large files, send as document for best results.\n"
-        "- If upload fails, try again later.\n\n"
-        "Made with ❤️"
+        "📝 *How to use this bot:*\n"
+        "• Send any file (document, video, audio, photo) upto 2GB.\n"
+        "• I will reply with a Gofile download link.\n"
+        "• For big files, send as document.\n"
+        "\n"
+        "If you get upload errors, try again later. Have fun!"
     )
 
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_file(client: Client, message: Message):
-    # Inform user upload has started
-    msg = await message.reply("⏳ Downloading your file...")
-    
+    # Send initial feedback message
+    reply = await message.reply("⏳ Downloading your file...")
+    file_path = None
+
     try:
-        # Download file locally
+        # Download the file locally
         file_path = await message.download()
+        await reply.edit("📤 Uploading to Gofile...")
 
-        # Inform user upload has started
-        await msg.edit("📤 Uploading file to Gofile...")
-
-        # Upload file to Gofile
+        # Upload to Gofile with robust error handling
         download_link = upload_to_gofile(file_path)
 
-        # Remove local file to save space
+        # Remove temp file
         try:
-            os.remove(file_path)
+            if file_path:
+                os.remove(file_path)
         except Exception as e:
-            print(f"[WARNING] Could not delete file {file_path}: {e}")
+            print(f"[WARNING] Couldn't delete file {file_path}: {e}")
 
-        # Send result
+        # Reply with link or error
         if download_link:
-            await msg.edit(f"✅ File uploaded successfully!\nDownload link:\n{download_link}")
+            await reply.edit(f"✅ Uploaded!\nDownload link:\n{download_link}")
         else:
-            await msg.edit("❌ Failed to upload the file to Gofile. Please try again later.")
+            await reply.edit("❌ Upload failed (Gofile server/API issue). Try again later.")
 
     except Exception as e:
-        # Catch any unexpected errors
         print(f"[ERROR] Exception in handle_file: {e}")
-        await msg.edit("❌ An unexpected error occurred. Please try again.")
+        await reply.edit("❌ An error occurred while processing your file. Try again.")
 
 if __name__ == "__main__":
-    print("Bot is starting...")
-    app.run()
+    print("Bot is starting...", flush=True)
+    try:
+        app.run()
+    except Exception as e:
+        import traceback
+        print("[FATAL] Bot crashed:", e)
+        traceback.print_exc()
