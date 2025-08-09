@@ -10,13 +10,34 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # Initialize the bot
 app = Client("gofilebot", api_id=APP_ID, api_hash=APP_HASH, bot_token=BOT_TOKEN)
 
+def get_gofile_server():
+    """Get an available Gofile server."""
+    try:
+        response = requests.get("https://api.gofile.io/getServer", timeout=10)
+        if response.status_code == 200 and response.text.strip():
+            data = response.json()
+            if data.get('status') == 'ok':
+                return data.get('data', {}).get('server')
+    except Exception as e:
+        print(f"Error getting Gofile server: {e}")
+    return None
+
 def upload_to_gofile(file_path):
     """Upload file to Gofile and return download link."""
-    url = "https://api.gofile.io/uploadFile"
+    # First get an available server
+    server = get_gofile_server()
+    if not server:
+        print("Failed to get Gofile server")
+        return None
+    
+    url = f"https://{server}.gofile.io/uploadFile"
     try:
         with open(file_path, "rb") as f:
             files = {'file': f}
-            response = requests.post(url, files=files, timeout=30)
+            response = requests.post(url, files=files, timeout=60)
+        
+        print(f"Response status: {response.status_code}")
+        print(f"Response text: {response.text[:200]}...")  # First 200 chars for debugging
         
         # Check if response is successful
         if response.status_code != 200:
@@ -30,6 +51,7 @@ def upload_to_gofile(file_path):
         if data.get('status') == 'ok':
             return data.get('data', {}).get('downloadPage')
         else:
+            print(f"API returned status: {data.get('status')}")
             return None
     except (requests.RequestException, ValueError, KeyError) as e:
         print(f"Error uploading to Gofile: {e}")
