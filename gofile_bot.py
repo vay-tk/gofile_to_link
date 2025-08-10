@@ -1,106 +1,96 @@
 import os
 import requests
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+from bs4 import BeautifulSoup
 
 APP_ID = int(os.environ.get("APP_ID"))
 APP_HASH = os.environ.get("APP_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GOFILE_UPLOAD_URL = "https://upload.gofile.io/uploadFile"
+SENDBIG_UPLOAD_URL = "https://www.sendbig.com/api-files/upload"
 
-# Initialize Pyrogram client
-app = Client("gofilebot", api_id=APP_ID, api_hash=APP_HASH, bot_token=BOT_TOKEN)
+# Initialize Pyrogram bot session
+app = Client("sendbigbot", api_id=APP_ID, api_hash=APP_HASH, bot_token=BOT_TOKEN)
 
-def create_progress_callback(message, client):
-    """Returns a callback for MultipartEncoderMonitor that sends progress to Telegram."""
-    def callback(monitor):
-        try:
-            percent = (monitor.bytes_read / monitor.len) * 100
-            # Only update every ~1%
-            if not hasattr(callback, "last_percent") or percent - callback.last_percent >= 1:
-                callback.last_percent = percent
-                client.loop.create_task(
-                    message.edit(f"📤 Uploading to Gofile... {percent:.2f}%")
-                )
-        except Exception as e:
-            print(f"[WARNING] Progress update error: {e}")
-    callback.last_percent = 0
-    return callback
-
-def upload_to_gofile_with_progress(file_path, message, client):
-    """Uploads file using MultipartEncoderMonitor to show real-time progress."""
+def upload_to_sendbig(file_path, progress_callback=None):
+    filename = os.path.basename(file_path)
+    filesize = os.path.getsize(file_path)
+    with open(file_path, "rb") as f:
+        files = {'file': (filename, file_read_with_progress(f, filesize, progress_callback))}
+        resp = requests.post(SENDBIG_UPLOAD_URL, files=files)
     try:
-        file_size = os.path.getsize(file_path)
-        m_encoder = MultipartEncoder(
-            fields={'file': (os.path.basename(file_path), open(file_path, 'rb'))}
-        )
-        monitor = MultipartEncoderMonitor(
-            m_encoder,
-            create_progress_callback(message, client)
-        )
-        headers = {"Content-Type": monitor.content_type}
-        response = requests.post(GOFILE_UPLOAD_URL, data=monitor, headers=headers, timeout=600)
-    except Exception as e:
-        print(f"[ERROR] Exception during upload: {e}")
-        return None
+        data = resp.json()
+        if "download_page" in data:  # Typical SendBig API link structure
+            return data["download_page"]
+        # Fallback: Parse download link from HTML (if JSON is absent)
+        match = re.search(r"https://www.sendbig.com/view-file/\w+", resp.text)
+        if match:
+            return match.group(0)
+    except Exception:
+        # Try parsing a download link in the raw HTML response
+        match = re.search(r"https://www.sendbig.com/view-file/\w+", resp.text)
+        if match:
+            return match.group(0)
+    return None
 
-    try:
-        data = response.json()
-    except Exception as e:
-        print(f"[ERROR] JSON decode failed: {e}")
-        print("Response text:", response.text)
-        return None
-
-    if data.get("status") == "ok":
-        return data["data"]["downloadPage"]
-    else:
-        print("[ERROR] Gofile API returned error:", data)
-        return None
+def file_read_with_progress(f, filesize, progress_callback=None, chunk=1024 * 1024):
+    sent = 0
+    while True:
+        data = f.read(chunk)
+        if not data:
+            break
+        sent += len(data)
+        if progress_callback:
+            percent = int(sent * 100 / filesize)
+            progress_callback(percent)
+        yield data
 
 @app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
     await message.reply(
-        "👋 Hello! Send me any file (photo, video, audio, document) up to 2GB, "
-        "and I will upload it to Gofile.io for you with progress updates!\n\n"
-        "Use /help for instructions."
+        "👋 Hello! Send me any file up to 2GB and I will upload it to SendBig and send you the download link.\n\n"
+        "Use /help for more details."
     )
 
 @app.on_message(filters.command("help"))
 async def help_command(client: Client, message: Message):
     await message.reply(
-        "📝 How to use:\n"
-        "- Send me any file as document, photo, audio, or video up to 2GB.\n"
-        "- I'll download it, upload it to Gofile.io, and show upload progress right in this chat.\n"
-        "- After upload, I'll send you the download link.\n\n"
-        "⚠️ Large files should be sent as documents for reliability. If upload fails, try again later."
+        "1. Send any file (document, photo, video, audio) as a message.\n"
+        "2. I'll upload it to SendBig and reply with the download link.\n"
+        "3. Max file size: 2GB (Telegram's own bot upload limit).\n"
+        "Note: SendBig file links remain valid per their retention policy."
     )
 
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_file(client: Client, message: Message):
     reply = await message.reply("⏳ Downloading your file...")
     file_path = None
+
+    def progress_updater(percent):
+        try:
+            client.loop.create_task(reply.edit(f"📤 Uploading to SendBig... {percent}%"))
+        except Exception:
+            pass  # Edit failures are not critical
+
     try:
         file_path = await message.download()
-        await reply.edit("📤 Starting upload to Gofile... 0.00%")
+        await reply.edit("📤 Uploading to SendBig... 0%")
+        link = upload_to_sendbig(file_path, progress_callback=progress_updater)
 
-        download_link = upload_to_gofile_with_progress(file_path, reply, client)
-
-        # Clean up file
-        try:
-            if file_path:
+        if file_path:
+            try:
                 os.remove(file_path)
-        except Exception as e:
-            print(f"[WARNING] Could not remove file: {file_path}, {e}")
+            except Exception:
+                pass
 
-        if download_link:
-            await reply.edit(f"✅ Uploaded successfully!\nDownload link:\n{download_link}")
+        if link:
+            await reply.edit(f"✅ Uploaded!\nDownload link:\n{link}")
         else:
-            await reply.edit("❌ Upload failed (possible Gofile API error). Please try again later.")
-
+            await reply.edit("❌ Upload failed (SendBig service error). Try again later.")
     except Exception as e:
-        print(f"[ERROR] Exception in file handler: {e}")
-        await reply.edit("❌ There was an error processing your file. Please try again.")
+        print(f"[ERROR] {e}")
+        await reply.edit("❌ There was an error processing your file. Try again.")
 
 if __name__ == "__main__":
     print("Bot is starting...", flush=True)
