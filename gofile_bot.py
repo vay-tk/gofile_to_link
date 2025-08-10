@@ -89,8 +89,11 @@ async def handle_file(client: Client, message: Message):
         else:
             await reply.edit("❌ Upload failed (SendBig service error). Try again later.")
     except Exception as e:
-        print(f"[ERROR] {e}")
-        await reply.edit("❌ There was an error processing your file. Try again.")
+    import traceback
+    tb = traceback.format_exc()
+    print(f"[ERROR] {e}\n{tb}")
+    await reply.edit(f"❌ Error: {str(e)}. Please try a smaller file or try again later.")
+
 
 if __name__ == "__main__":
     print("Bot is starting...", flush=True)
