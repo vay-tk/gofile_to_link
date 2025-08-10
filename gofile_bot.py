@@ -2,6 +2,7 @@ import os
 import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 APP_ID = int(os.environ.get("APP_ID"))
 APP_HASH = os.environ.get("APP_HASH")
@@ -11,55 +12,39 @@ GOFILE_UPLOAD_URL = "https://upload.gofile.io/uploadFile"
 # Initialize Pyrogram client
 app = Client("gofilebot", api_id=APP_ID, api_hash=APP_HASH, bot_token=BOT_TOKEN)
 
-class ProgressFile:
-    def __init__(self, filepath, message: Message, client: Client, chunk_size=1024*1024):
-        self.file = open(filepath, 'rb')
-        self.file_size = os.path.getsize(filepath)
-        self.message = message
-        self.client = client
-        self.chunk_size = chunk_size
-        self.uploaded = 0
-        self.last_update = 0
-
-    def __len__(self):
-        return self.file_size
-
-    def read(self, size=None):
-        if size is None:
-            size = self.chunk_size
-        data = self.file.read(size)
-        if not data:
-            return b""
-        self.uploaded += len(data)
-
-        # Limit updates to every ~1MB or if first chunk
-        if self.uploaded - self.last_update > 1024*1024 or self.uploaded == len(data):
-            self.last_update = self.uploaded
-            percentage = (self.uploaded / self.file_size) * 100
-            # Schedule async edit to update progress message without awaiting here
-            self.client.loop.create_task(
-                self.message.edit_text(f"📤 Uploading to Gofile... {percentage:.2f}%")
-            )
-        return data
-
-    def close(self):
-        self.file.close()
+def create_progress_callback(message, client):
+    """Returns a callback for MultipartEncoderMonitor that sends progress to Telegram."""
+    def callback(monitor):
+        try:
+            percent = (monitor.bytes_read / monitor.len) * 100
+            # Only update every ~1%
+            if not hasattr(callback, "last_percent") or percent - callback.last_percent >= 1:
+                callback.last_percent = percent
+                client.loop.create_task(
+                    message.edit(f"📤 Uploading to Gofile... {percent:.2f}%")
+                )
+        except Exception as e:
+            print(f"[WARNING] Progress update error: {e}")
+    callback.last_percent = 0
+    return callback
 
 def upload_to_gofile_with_progress(file_path, message, client):
-    """
-    Upload file in chunks and update progress message in Telegram.
-    """
+    """Uploads file using MultipartEncoderMonitor to show real-time progress."""
     try:
-        pf = ProgressFile(file_path, message, client)
-        files = {'file': ('filename', pf)}
-
-        response = requests.post(GOFILE_UPLOAD_URL, files=files, timeout=300)
-        pf.close()
+        file_size = os.path.getsize(file_path)
+        m_encoder = MultipartEncoder(
+            fields={'file': (os.path.basename(file_path), open(file_path, 'rb'))}
+        )
+        monitor = MultipartEncoderMonitor(
+            m_encoder,
+            create_progress_callback(message, client)
+        )
+        headers = {"Content-Type": monitor.content_type}
+        response = requests.post(GOFILE_UPLOAD_URL, data=monitor, headers=headers, timeout=600)
     except Exception as e:
         print(f"[ERROR] Exception during upload: {e}")
         return None
 
-    # Parse response safely
     try:
         data = response.json()
     except Exception as e:
@@ -86,18 +71,15 @@ async def help_command(client: Client, message: Message):
     await message.reply(
         "📝 How to use:\n"
         "- Send me any file as document, photo, audio, or video up to 2GB.\n"
-        "- I'll download it, upload it to Gofile.io,\n"
-        "  and show upload progress in this chat.\n"
+        "- I'll download it, upload it to Gofile.io, and show upload progress right in this chat.\n"
         "- After upload, I'll send you the download link.\n\n"
-        "⚠️ Large files should be sent as documents for reliability.\n"
-        "If upload fails, try again later."
+        "⚠️ Large files should be sent as documents for reliability. If upload fails, try again later."
     )
 
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_file(client: Client, message: Message):
     reply = await message.reply("⏳ Downloading your file...")
     file_path = None
-
     try:
         file_path = await message.download()
         await reply.edit("📤 Starting upload to Gofile... 0.00%")
